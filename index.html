@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WB расчеты по детализации</title>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+  <style>
+    :root {
+      --bg:#f6f7fb; --card:#fff; --text:#1f2937; --muted:#6b7280; --line:#e5e7eb;
+      --accent:#0f766e; --accent2:#115e59; --good:#166534; --warn:#92400e; --bad:#991b1b;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter,system-ui,sans-serif; background:var(--bg); color:var(--text); }
+    .wrap { max-width:1200px; margin:0 auto; padding:24px; }
+    h1 { margin:0 0 8px; font-size:30px; }
+    .sub { color:var(--muted); margin-bottom:20px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:18px; margin-bottom:16px; box-shadow:0 4px 14px rgba(0,0,0,.04); }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .btn { background:var(--accent); color:#fff; border:none; border-radius:12px; padding:12px 16px; cursor:pointer; font-weight:600; }
+    .btn:hover { background:var(--accent2); }
+    .btn.secondary { background:#fff; color:var(--text); border:1px solid var(--line); }
+    input[type=file] { width:100%; padding:12px; border:1px dashed var(--line); border-radius:12px; background:#fafafa; }
+    table { width:100%; border-collapse:collapse; font-size:14px; }
+    th, td { border-bottom:1px solid var(--line); padding:10px 8px; text-align:left; vertical-align:top; }
+    th { background:#f9fafb; position:sticky; top:0; }
+    .num { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .muted { color:var(--muted); }
+    .pill { display:inline-block; padding:4px 8px; border-radius:999px; background:#ecfeff; color:#155e75; font-size:12px; }
+    .ok { color:var(--good); font-weight:600; }
+    .warn { color:var(--warn); font-weight:600; }
+    .bad { color:var(--bad); font-weight:600; }
+    .small { font-size:12px; color:var(--muted); }
+    .scroll { overflow:auto; max-height:520px; }
+    .kpi { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+    .kpi .box { border:1px solid var(--line); border-radius:14px; padding:14px; background:#fcfcfd; }
+    .kpi .v { font-size:26px; font-weight:700; margin-top:6px; }
+    @media (max-width: 900px){ .grid,.kpi{grid-template-columns:1fr;} }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Мини-веб-приложение: расчеты по детализации WB</h1>
+  <div class="sub">Загрузите еженедельный детализированный отчет XLSX. Приложение считает показатели по правилам из памятки и строит сводку.</div>
+
+  <div class="card">
+    <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" />
+    <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="btn" id="downloadBtn" disabled>Скачать результат в Excel</button>
+      <button class="btn secondary" id="demoBtn">Загрузить демо-логику без файла</button>
+    </div>
+    <div id="status" class="small" style="margin-top:10px;">Ожидается файл.</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Итоговые пункты</h3>
+      <div class="scroll"><table id="resultTable"></table></div>
+    </div>
+    <div class="card">
+      <h3>Контрольные показатели</h3>
+      <div class="kpi" id="kpi"></div>
+      <hr style="border:none;border-top:1px solid var(--line);margin:16px 0;">
+      <div id="notes" class="small"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Сводная таблица по памятке</h3>
+    <div class="scroll"><table id="pivotTable"></table></div>
+  </div>
+</div>
+
+<script>
+const mapping = {
+  docType: ['Тип документа'],
+  reason: ['Обоснование для оплаты'],
+  acqType: ['Тип платежа: компенсация платёжных услуг/Комиссия за интеграцию платёжных сервисов'],
+  country: ['Страна'],
+  logisticsKind: ['Виды логистики, штрафов и корректировок ВВ'],
+  realized: ['Вайлдберриз реализовал Товар (Пр)'],
+  loyaltyComp: ['Компенсация скидки по программе лояльности'],
+  wbFee: ['Вознаграждение Вайлдберриз (ВВ), без НДС'],
+  wbVat: ['НДС с Вознаграждения Вайлдберриз'],
+  wbAdj: ['Корректировка Вознаграждения Вайлдберриз (ВВ)'],
+  loyaltyCost: ['Стоимость участия в программе лояльности'],
+  acqFee: ['Вознаграждение с продаж до вычета услуг поверенного, без НДС'],
+  pvz: ['Возмещение за выдачу и возврат товаров на ПВЗ'],
+  transportComp: ['Возмещение издержек по перевозке/по складским операциям с товаром'],
+  sellerTransfer: ['К перечислению Продавцу за реализованный Товар'],
+  storage: ['Хранение'],
+  acceptance: ['Операции на приемке'],
+  loyaltyPoints: ['Сумма баллов, удержанных по программе лояльности'],
+  delivery: ['Услуги по доставке товара покупателю'],
+  penalties: ['Общая сумма штрафов'],
+  deductions: ['Удержания']
+};
+
+let currentResult = null;
+let currentRows = [];
+
+function findColumn(headers, variants){ return variants.find(v => headers.includes(v)); }
+function num(v){ if(v===null||v===undefined||v==='') return 0; if(typeof v==='number') return v; let s=String(v).replace(/\s/g,'').replace(',', '.'); let n=parseFloat(s); return isNaN(n)?0:n; }
+function text(v){ return (v??'').toString().trim(); }
+function sumBy(rows, predicate, col){ return rows.filter(predicate).reduce((a,r)=>a+num(r[col]),0); }
+function positive(v){ return v>0 ? v : 0; }
+function negative(v){ return v<0 ? v : 0; }
+function fmt(v){ return new Intl.NumberFormat('ru-RU',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v); }
+
+function buildPivot(rows, cols){
+  const keyCols = [cols.docType, cols.reason, cols.acqType];
+  const valueCols = [cols.realized, cols.loyaltyComp, cols.wbFee, cols.wbVat, cols.wbAdj, cols.loyaltyCost, cols.acqFee, cols.pvz, cols.transportComp, cols.sellerTransfer, cols.storage, cols.acceptance, cols.loyaltyPoints].filter(Boolean);
+  const map = new Map();
+  rows.forEach(r=>{
+    const key = keyCols.map(c=>text(r[c]||'')).join(' | ');
+    if(!map.has(key)) {
+      const obj = {key, doc:text(r[cols.docType]), reason:text(r[cols.reason]), acq:text(r[cols.acqType])};
+      valueCols.forEach(c=>obj[c]=0);
+      map.set(key,obj);
+    }
+    const obj = map.get(key);
+    valueCols.forEach(c=> obj[c]+=num(r[c]));
+  });
+  return Array.from(map.values());
+}
+
+function calculate(rows){
+  const headers = Object.keys(rows[0]||{});
+  const cols = {};
+  for (const [k,v] of Object.entries(mapping)) cols[k]=findColumn(headers,v);
+  const missing = Object.entries(cols).filter(([k,v])=>!v && !['acceptance','loyaltyPoints','penalties','deductions','storage','wbAdj','loyaltyCost','loyaltyComp','acqFee'].includes(k)).map(([k])=>k);
+
+  const isSale = r => text(r[cols.docType]).toLowerCase()==='продажа';
+  const isReturn = r => text(r[cols.docType]).toLowerCase()==='возврат';
+  const reasonEq = val => r => text(r[cols.reason]).toLowerCase()===val.toLowerCase();
+  const acqEq = val => r => text(r[cols.acqType]).replace(/\s/g,'').toLowerCase()===val.replace(/\s/g,'').toLowerCase();
+
+  const logisticsRF = cols.country && cols.delivery ? sumBy(rows, r => text(r[cols.country]).toLowerCase()==='россия', cols.delivery) : 0;
+  const logisticsNonRF = cols.country && cols.delivery ? sumBy(rows, r => text(r[cols.country]).toLowerCase()!=='россия' && text(r[cols.country])!=='', cols.delivery) : 0;
+
+  const p11 = (sumBy(rows, r => isSale(r) && reasonEq('Продажа')(r), cols.realized)
+             - sumBy(rows, r => isReturn(r) && reasonEq('Возврат')(r), cols.realized)
+             - sumBy(rows, r => isSale(r), cols.loyaltyComp)
+             + sumBy(rows, r => isReturn(r), cols.loyaltyComp));
+  const p12 = sumBy(rows, reasonEq('Услуга платной доставки'), cols.realized);
+  const p13 = sumBy(rows, r => isSale(r) && reasonEq('Бронирование товара через самовывоз')(r), cols.realized)
+            - sumBy(rows, r => isReturn(r) && reasonEq('Бронирование товара через самовывоз')(r), cols.realized);
+  const p14 = sumBy(rows, r => isSale(r) && reasonEq('Компенсация скидки по программе лояльности')(r), cols.loyaltyComp)
+            - sumBy(rows, r => isReturn(r) && reasonEq('Компенсация скидки по программе лояльности')(r), cols.loyaltyComp);
+  const p1 = p11 + p12 + p13 + p14;
+
+  const A = sumBy(rows, isSale, cols.wbFee) - sumBy(rows, isReturn, cols.wbFee);
+  const B = sumBy(rows, isSale, cols.wbVat) - sumBy(rows, isReturn, cols.wbVat);
+  const p21 = A + B + sumBy(rows, ()=>true, cols.acceptance) + sumBy(rows, ()=>true, cols.storage) + sumBy(rows, ()=>true, cols.wbAdj) + logisticsRF - sumBy(rows, ()=>true, cols.transportComp);
+  const p23 = sumBy(rows, r => isSale(r) && reasonEq('Стоимость участия в программе лояльности')(r), cols.loyaltyCost)
+            - sumBy(rows, r => isReturn(r) && reasonEq('Стоимость участия в программе лояльности')(r), cols.loyaltyCost);
+  const p25 = logisticsNonRF;
+  const p26 = sumBy(rows, r => isSale(r) && acqEq('Перевыставлениеэквайринга')(r), cols.acqFee)
+            - sumBy(rows, r => isReturn(r) && acqEq('Перевыставлениеэквайринга')(r), cols.acqFee);
+  const p27 = sumBy(rows, ()=>true, cols.transportComp);
+  const p28 = sumBy(rows, isSale, cols.pvz) - sumBy(rows, isReturn, cols.pvz);
+  const p29 = sumBy(rows, ()=>true, cols.penalties);
+  const p210 = rows.reduce((a,r)=>{
+    const d = num(r[cols.deductions]);
+    const kind = text(r[cols.logisticsKind]);
+    if (d>0 && kind !== 'Платёж по договору займа' && kind !== 'Страхование заказов Цунами') return a+d;
+    return a;
+  },0);
+  const p2 = p21 + p23 + p25 + p26 + p27 + p28 + p29 + p210;
+
+  const p3 = rows.reduce((a,r)=>{
+    const d = num(r[cols.deductions]);
+    const kind = text(r[cols.logisticsKind]);
+    if (kind === 'Платёж по договору займа' || kind === 'Страхование заказов Цунами') return a + d;
+    return a;
+  },0);
+
+  const p4 = sumBy(rows, r => isSale(r) && ['Компенсация ущерба','Добровольная компенсация при возврате'].includes(text(r[cols.reason])), cols.sellerTransfer)
+           - sumBy(rows, r => isReturn(r) && ['Компенсация ущерба','Добровольная компенсация при возврате'].includes(text(r[cols.reason])), cols.sellerTransfer);
+  const p5 = rows.reduce((a,r)=> a + negative(num(r[cols.deductions])), 0);
+  const p6 = sumBy(rows, isSale, cols.loyaltyPoints) - sumBy(rows, isReturn, cols.loyaltyPoints);
+  const p7 = p1 - p2 - p3 + p4 + p5 - p6;
+
+  return {
+    cols, missing, logisticsRF, logisticsNonRF,
+    items: [
+      ['п.1.1 Стоимость реализованного товара', p11],
+      ['п.1.2 Стоимость реализованных услуг', p12],
+      ['п.1.3 Забронированный товар при самовывозе', p13],
+      ['п.1.4 Компенсация скидки лояльности', p14],
+      ['п.1 Итого стоимость реализованного товара и услуг', p1],
+      ['п.2.1 Вознаграждение ВБ + НДС + корректировки + логистика РФ', p21],
+      ['п.2.3 Стоимость участия в программе лояльности', p23],
+      ['п.2.5 Международная логистика', p25],
+      ['п.2.6 Возмещение издержек по эквайрингу', p26],
+      ['п.2.7 Возмещение расходов по перевозке', p27],
+      ['п.2.8 Возмещение за выдачу/возврат на ПВЗ', p28],
+      ['п.2.9 Штрафы', p29],
+      ['п.2.10 Прочие удержания', p210],
+      ['п.2 Итого зачтено из стоимости реализованного товара', p2],
+      ['п.3 Удержания в пользу третьих лиц', p3],
+      ['п.4 Компенсация ущерба', p4],
+      ['п.5 Прочие выплаты', p5],
+      ['п.6 Удержание за баллы программы лояльности', p6],
+      ['п.7 Итого к перечислению продавцу', p7]
+    ],
+    pivot: buildPivot(rows, cols)
+  };
+}
+
+function render(result){
+  const rt = document.getElementById('resultTable');
+  rt.innerHTML = '<tr><th>Показатель</th><th class="num">Сумма</th></tr>' + result.items.map(([k,v])=>`<tr><td>${k}</td><td class="num">${fmt(v)}</td></tr>`).join('');
+
+  const kpi = document.getElementById('kpi');
+  const find = key => result.items.find(x=>x[0]===key)?.[1] ?? 0;
+  kpi.innerHTML = `
+    <div class="box"><div class="muted">Итого к перечислению</div><div class="v">${fmt(find('п.7 Итого к перечислению продавцу'))}</div></div>
+    <div class="box"><div class="muted">Логистика РФ</div><div class="v">${fmt(result.logisticsRF)}</div></div>
+    <div class="box"><div class="muted">Логистика не РФ</div><div class="v">${fmt(result.logisticsNonRF)}</div></div>`;
+
+  const notes = document.getElementById('notes');
+  notes.innerHTML = (result.missing.length
+    ? `<div class="warn">Не найдены некоторые поля: ${result.missing.join(', ')}. Расчет выполнен частично.</div>`
+    : `<div class="ok">Ключевые поля для расчета найдены.</div>`) +
+    `<div style="margin-top:8px">Правила взяты из памятки: строки сводной по «Тип документа», «Обоснование для оплаты», «Тип платежа за эквайринг»; отдельный расчет логистики по РФ и не РФ; итоговый пункт 7 считается как п.1 - п.2 - п.3 + п.4 + п.5 - п.6.</div>`;
+
+  const pt = document.getElementById('pivotTable');
+  const pivotCols = result.pivot.length ? Object.keys(result.pivot[0]) : [];
+  pt.innerHTML = pivotCols.length ?
+    '<tr>'+pivotCols.map(c=>`<th>${c}</th>`).join('')+'</tr>' +
+    result.pivot.map(r=>'<tr>'+pivotCols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${typeof r[c]==='number'?fmt(r[c]):(r[c]??'')}</td>`).join('')+'</tr>').join('')
+    : '<tr><td>Нет данных</td></tr>';
+}
+
+function exportExcel(result){
+  const wb = XLSX.utils.book_new();
+  const ws1 = XLSX.utils.aoa_to_sheet([['Показатель','Сумма'], ...result.items]);
+  const ws2 = XLSX.utils.json_to_sheet(result.pivot);
+  XLSX.utils.book_append_sheet(wb, ws1, 'Итоги');
+  XLSX.utils.book_append_sheet(wb, ws2, 'Сводная');
+  XLSX.writeFile(wb, 'wb-raschet-result.xlsx');
+}
+
+function handleRows(rows){
+  currentRows = rows;
+  currentResult = calculate(rows);
+  render(currentResult);
+  document.getElementById('downloadBtn').disabled = false;
+}
+
+document.getElementById('fileInput').addEventListener('change', async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  document.getElementById('status').textContent = 'Файл загружается...';
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data, {type:'array'});
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, {defval:''});
+  handleRows(rows);
+  document.getElementById('status').textContent = `Загружено строк: ${rows.length}. Лист: ${wb.SheetNames[0]}`;
+});
+
+document.getElementById('downloadBtn').addEventListener('click', ()=>{ if(currentResult) exportExcel(currentResult); });
+document.getElementById('demoBtn').addEventListener('click', ()=>{
+  const demo = [
+    {'Тип документа':'Продажа','Обоснование для оплаты':'Продажа','Тип платежа: компенсация платёжных услуг/Комиссия за интеграцию платёжных сервисов':'','Страна':'Россия','Виды логистики, штрафов и корректировок ВВ':'','Вайлдберриз реализовал Товар (Пр)':447,'Компенсация скидки по программе лояльности':0,'Вознаграждение Вайлдберриз (ВВ), без НДС':-3.93,'НДС с Вознаграждения Вайлдберриз':-0.86,'Корректировка Вознаграждения Вайлдберриз (ВВ)':0,'Стоимость участия в программе лояльности':0,'Вознаграждение с продаж до вычета услуг поверенного, без НДС':6.86,'Возмещение за выдачу и возврат товаров на ПВЗ':13.16,'Возмещение издержек по перевозке/по складским операциям с товаром':0,'К перечислению Продавцу за реализованный Товар':416.82,'Хранение':0,'Операции на приемке':0,'Сумма баллов, удержанных по программе лояльности':0,'Услуги по доставке товара покупателю':119.89,'Общая сумма штрафов':0,'Удержания':0},
+    {'Тип документа':'','Обоснование для оплаты':'Логистика','Тип платежа: компенсация платёжных услуг/Комиссия за интеграцию платёжных сервисов':'','Страна':'Россия','Виды логистики, штрафов и корректировок ВВ':'К клиенту при продаже','Вайлдберриз реализовал Товар (Пр)':0,'Компенсация скидки по программе лояльности':0,'Вознаграждение Вайлдберриз (ВВ), без НДС':0,'НДС с Вознаграждения Вайлдберриз':0,'Корректировка Вознаграждения Вайлдберриз (ВВ)':0,'Стоимость участия в программе лояльности':0,'Вознаграждение с продаж до вычета услуг поверенного, без НДС':0,'Возмещение за выдачу и возврат товаров на ПВЗ':0,'Возмещение издержек по перевозке/по складским операциям с товаром':0,'К перечислению Продавцу за реализованный Товар':0,'Хранение':0,'Операции на приемке':0,'Сумма баллов, удержанных по программе лояльности':0,'Услуги по доставке товара покупателю':24.31,'Общая сумма штрафов':0,'Удержания':0}
+  ];
+  handleRows(demo);
+  document.getElementById('status').textContent = 'Загружен демонстрационный набор данных.';
+});
+</script>
+</body>
+</html>
